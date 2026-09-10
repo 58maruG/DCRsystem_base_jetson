@@ -1,0 +1,57 @@
+[project]
+name = "dcrsystem-base-jetson"
+version = "0.1.0"
+description = "DCRsystem_base の Jetson Orin Nano Super (JetPack 6.2) 向け環境"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "duckdb>=1.5.4",
+    "hidapi>=0.15.0",
+    # ByteTrack が使う線形割当。明示しないと ultralytics が起動時に
+    #   check_requirements で自動 pip install を試み、オフラインだと失敗する。
+    "lap>=0.5.13",
+    "numpy>=2.2.6,<2.3",  # 2.3以降はPython>=3.12必須のためPython3.10(JetPack6)では使えない
+    "onnx>=1.22.0",
+    # Windows版の pin (>=1.23.2,<1.24) はPyPI標準のcp310 aarch64 wheelが無いための制約。
+    # Jetson AI Lab索引には1.24.0のaarch64 wheelがあるためこちらを採用する。
+    "onnxruntime-gpu==1.24.0",
+    "onnxslim>=0.1.94",
+    "opencv-python>=4.13.0.92",
+    "pypylon>=26.5.0",
+    "pyserial>=3.5",
+    # Windows版の pin (>=6.11.1) のaarch64 wheelは manylinux_2_39 (glibc>=2.39) 用で、
+    # JetPack6.2 (Ubuntu 22.04 / glibc 2.35) には入らない。aarch64 wheelがある
+    # 最後のバージョンである 6.8.0.2 (manylinux_2_31, glibc>=2.31) に固定する。
+    "pyside6==6.8.0.2",
+    "serial>=0.0.97",
+    # tensorrt はここに含めない。JetPack付属のシステムパッケージ
+    # (apt経由、/usr/lib/python3.10/dist-packages、実機確認済み: 10.3.0) を
+    # `uv venv --system-site-packages --python /usr/bin/python3` で共有する。
+    # PyPI/Jetson AI Lab索引のどちらにもJetson向けtensorrt wheelは無い。
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "ultralytics>=8.4.80",
+]
+
+# torch/torchvision/onnxruntime-gpu はJetson AI Lab索引（JetPack6.2/CUDA12.6/
+#   Python3.10=cp310向けのaarch64 wheelを配布）から明示的に取得する。
+#   PyPI標準のwheelはx86_64向けのみでJetsonでは動作しないため。
+#   explicit=true + tool.uv.sources でこの3パッケージだけをこの索引に固定しており、
+#   pyside6 等の他パッケージには影響しない
+#   （--extra-index-url 方式だと uv の依存関係混同対策で他パッケージの解決が
+#    壊れることを実機検証で確認済み）。
+[[tool.uv.index]]
+name = "jetson-ai-lab-jp6-cu126"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "jetson-ai-lab-jp6-cu126" }
+torchvision = { index = "jetson-ai-lab-jp6-cu126" }
+onnxruntime-gpu = { index = "jetson-ai-lab-jp6-cu126" }
+
+# このプロジェクトはJetson(Linux/aarch64)専用。torch等がWindows/mac向けwheelを
+# 持たないため、解決対象をこの環境だけに限定する（付けないとuniversal resolutionが
+# 全プラットフォーム分のwheelを探して失敗する）。
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'aarch64'"]
