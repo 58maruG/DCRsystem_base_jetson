@@ -73,13 +73,12 @@ telemetry_sources.py         health スレッド向けテレメトリ取得ヘ�
 | ファイル | 用途 |
 |---|---|
 | `hsv_calibration.py` | 果実検出（HSV存在検出＋推論ゲート）の閾値をスライダーで調整し `json/hsv_config_{cam}.json` へ保存 |
-| `relay_calibration.py` | リレー（仕分け弁）の開弁タイミングをスライダーで実機に合わせ込む（`module_relay.py`が動く前提。上記「Jetson実機での動作前に確認すること」参照） |
+| `relay_calibration.py` | リレー（仕分け弁）の開弁タイミングをスライダーで実機に合わせ込む |
 | `delay_calibration.py` | カメラ表示遅延（delay_seconds）の実測キャリブレーション |
 | `hsv_ripeness_classifier.py` | 赤色占有率スコアによる healthy/unripe 振り分けGUI（学習データ整備用） |
 | `classification_gui_demo.py` | 実機なしで個体確定〜健全/障害判定の流れを確認するデモ |
 | `analyze_cycle_logs.py` | 本番が書いた cycle ログから1個体あたりの実コストを集計・比較する（OS非依存） |
-| `project_jetson.py` | 実測したスケール係数をJetson実機の処理時間へ換算する（OS非依存） |
-| `run_as_jetson.py` / `jetson_live_probe.py` / `jetson_probe_common.py` | **[Windows PC専用]** Jetson購入判断のためWindows PCをJetson相当に制限して検証したツール。Jetson実機では動作しない（購入判断は完了済みのため参考として残置） |
+
 
 ## セットアップ（Jetson実機）
 
@@ -152,8 +151,3 @@ Windows版 [pyproject.toml](../DCRsystem5goki_app_base/pyproject.toml) との主
 | onnxruntime-gpu | >=1.23.2,<1.24 | ==1.24.0 | Windows版の上限はPyPI標準にcp310 aarch64 wheelが無いための制約。Jetson AI Lab索引には1.24.0のaarch64 wheelがある |
 | pyside6 | >=6.11.1 | ==6.8.0.2 | aarch64 wheelが `manylinux_2_39`(glibc>=2.39)用でJetPack6.2(glibc2.35)に入らないため、入る最後の版に固定 |
 | tensorrt | >=11.1.0.106 (pip) | 依存に含めない | Jetson向けpip wheelが無い。JetPack付属のシステムパッケージを`--system-site-packages`で共有 |
-
-2026-08-24時点、Pythonパッケージ層（torch/torchvision/tensorrt/onnxruntime-gpu）はJetson実機で
-動作確認済み（`CUDAExecutionProvider`/`TensorrtExecutionProvider`も利用可能）。ただし当時は
-`requirements-jetson.txt`による旧方式での確認であり、この`pyproject.toml`/`uv.lock`構成での
-実機再確認はまだ行っていない。`module_relay.py`のLinux対応（Y2C製ドライバ経由）も未検証。
