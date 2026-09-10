@@ -1,6 +1,6 @@
-# DCRsystem5goki_app_base_Jetson
+# DCRsystem_base_Jetson
 
-[DCRsystem5goki_app_base](../DCRsystem5goki_app_base) の **Jetson Orin Nano Super
+[DCRsystem_base](../DCRsystem_base) の **Jetson Orin Nano Super
 (JetPack 6.2 / L4T R36.4.7 / Ubuntu 22.04 / Python 3.10.12) 向け派生**。
 Windows版とはPythonパッケージの調達元・バージョンが異なるため、`pyproject.toml` /
 `uv.lock` / `.python-version` を別に持つ独立ディレクトリとして管理している。
