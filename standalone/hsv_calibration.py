@@ -502,18 +502,15 @@ class CameraThread:
                 try:
                     pylon.FeaturePersistence.Load(pfs_path, cam.GetNodeMap(), True)
                 except Exception as e:
-                    # 4台同時起動時は帯域がカメラ間で分け合われ、pfs保存値(163MB/s)通りに
+                    # 4台同時起動時は帯域がカメラ間で分け合われ、pfs保存値通りに
                     #   ならないことがある(verify不一致で例外)。module_cameras.py の
-                    #   load_pfs_custom と同様、ここで継続してよい（帯域は下で明示設定する）。
+                    #   load_pfs_custom と同様、ここは継続してよい（カメラの現設定で動く）。
                     print(f"[{self.cam_name}] pfs読込エラー（現設定で継続）: {e}")
             else:
                 print(f"[{self.cam_name}] pfsが見つかりません（カメラ現設定で継続）: {pfs_path}")
 
-            # 帯域上限はpfsの値によらずここで明示固定する（module_cameras.py と同じ対策）。
-            #   先に設定しないとpfs側の値(163MB/s等)で上書きされ得るため、pfs読み込み後に行う。
-            if hasattr(cam, 'DeviceLinkThroughputLimit'):
-                cam.DeviceLinkThroughputLimitMode.Value = "On"
-                cam.DeviceLinkThroughputLimit.Value = 80000000  # 80MB/s
+            # 帯域上限はコードで上書きしない（module_cameras.py と同じ方針）。
+            #   校正は本番と同じ条件で行う必要があるため、pfs の値をそのまま使う。
 
             conv = pylon.ImageFormatConverter()
             conv.OutputPixelFormat = pylon.PixelType_BGR8packed

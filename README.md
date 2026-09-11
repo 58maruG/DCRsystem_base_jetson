@@ -157,8 +157,11 @@ English 識別子は過去ログとの互換のため従来のまま（被害 = 
 | `cam_inside` | 25308967 | `cam_pfs/cam_inside_25308967.pfs` |
 | `cam_outside` | 25308968 | `cam_pfs/cam_outside_25308968.pfs` |
 
-帯域上限は PFS ロードの**後**に4台とも 50MB/s・制限 On へ統一する（先に設定すると PFS 側の値で
-上書きされる）。実必要帯域は4台合計で約 83MB/s。
+帯域上限は**コードで上書きせず PFS の値をそのまま使う**。PFS はカメラ個体ごとに pylon Viewer で
+詰めた設定で、帯域もその一部だからである。現行値は cam_top / cam_outside = 163MB/s、
+cam_under / cam_inside = 80MB/s（4台とも `DeviceLinkThroughputLimitMode = On`）。実必要帯域は
+4台合計で約 83MB/s なのでいずれも余裕がある。変更したいときは PFS を撮り直す
+（pylon Viewer → Save Features）。実際に効いている値は起動ログに出る。
 
 ### リレーボードのチャンネル割当（`module_relay.RelayChannel`）
 

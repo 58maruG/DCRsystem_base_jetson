@@ -113,15 +113,21 @@ class CameraController(QObject):
                 else:
                     log.warning("%s: 設定解析失敗", self.name)
 
-            # 帯域上限は pfs 読み込みの「後」に設定する。
-            #   先に設定すると load_pfs_custom が pfs 側の値（163MB/s、cam_inside は制限モードOff）で
-            #   上書きし、コードの意図した制限が無効化されてしまう（旧実装のバグ）。
-            #   4台すべてを 50MB/s・制限Onに統一し、cam_inside の Off 不整合もここで解消する。
-            #   実必要帯域は約83MB/s（4台合計、実解像度×20fps）なので、50MB/s×4台=200MB/sは十分。
+            # 帯域上限はコードで上書きしない。pfs に保存された値をそのまま使う。
+            #   pfs はカメラ個体ごとに pylon Viewer で詰めた設定であり、帯域もその一部。
+            #   コード側で一律の値へ固定すると、個体別に合わせ込んだ設定を無言で壊す。
+            #   現行の pfs 設定値: cam_top / cam_outside = 163MB/s、cam_under / cam_inside = 80MB/s
+            #   （4台とも DeviceLinkThroughputLimitMode = On）。実必要帯域は4台合計で約83MB/s
+            #   （実解像度×20fps）なので、いずれも余裕がある。
+            #   帯域を変えたいときは pfs を撮り直すこと（pylon Viewer → Save Features）。
+            #   実際に効いている値は起動ログに残し、pfs を開かなくても確認できるようにする。
             if hasattr(self.camera, 'DeviceLinkThroughputLimit'):
-                self.camera.DeviceLinkThroughputLimitMode.Value = "On"
-                self.camera.DeviceLinkThroughputLimit.Value = 50000000  # 50MB/s
-                log.info("%s: 帯域上限を 50MB/s に設定（pfsロード後・制限On）", self.name)
+                try:
+                    log.info("%s: 帯域上限 %.0fMB/s（モード=%s・pfs由来）", self.name,
+                             self.camera.DeviceLinkThroughputLimit.Value / 1e6,
+                             self.camera.DeviceLinkThroughputLimitMode.Value)
+                except Exception as e:
+                    log.warning("%s: 帯域設定の読み取りに失敗: %s", self.name, e)
 
             self.width  = self.camera.Width.Value
             self.height = self.camera.Height.Value
