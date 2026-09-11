@@ -48,6 +48,8 @@ if _ROOT_DIR not in sys.path:
 # main.py（Arduino版）と同じカメラ/モーターモジュールを使う
 import module_cameras as cam_ctr
 import module_motor_serial as motor_ctr
+# 1回転あたりのパルス数を本番と共有するため（定数の参照のみ。ボードは開かない）
+import module_relay as r_ctr
 
 # ==========================================================
 # アーキテクチャ上の役割（main の update_camera_delays と一致させる）
@@ -70,10 +72,25 @@ SPEED_MAP = {
     5: 0.0006, 6: 0.0005, 7: 0.0004, 8: 0.0003, 9: 0.0002, 10: 0.0001
 }
 RATIO = 1.0
-MICRO_STATUS = 16   # TB6600=3200 pulse/rev ÷ 200 step/rev（module_relay と合わせる）
+# 1回転あたりのパルス数は module_relay.PULSE_PER_ROTATION を唯一の定義元とする。
+#   ここで独自に「200step/回転 × 分割数」を書き直すと、ドライバの分割設定を変えたときに
+#   片方だけ直され、本番（リレー待機時間）と校正ツールの計算が静かにズレる。
 
-# main.py が現在採用している固定遅延値（実測との突き合わせ用）
-CURRENT_MAIN_DELAYS = {"cam_under": 1.922, "cam_inside": 2.015}
+
+def load_current_main_delays() -> tuple[dict, str]:
+    """main が現在使っている遅延値を json/delay_config.json から読む（実測との突き合わせ用）。
+    main.update_camera_delays() と同じファイルを見るので、前回校正した値と今回の実測を
+    そのまま比較できる。戻り値は ({カメラ名: 秒}, 保存日時)。
+    ファイルが無い/壊れている場合は ({}, "") を返し、比較をスキップさせる。"""
+    path = os.path.join(_ROOT_DIR, "json", "delay_config.json")
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            loaded = json.load(f)
+    except Exception as e:
+        print(f"!! 現行遅延値を読めません（比較をスキップします）: {e}")
+        return {}, ""
+    delays = {cam: float(loaded[cam]) for cam in DELAYED_CAMS if cam in loaded}
+    return delays, str(loaded.get("updated_at", "不明"))
 
 
 # ==========================================================
@@ -285,10 +302,11 @@ def print_report(summary, speed):
         else:
             print(f"  {cam}: {max(0.0, val):.3f} 秒")
 
-    # --- main が現在使っている固定遅延値との比較 ---
-    print("\n--- main.py の現行固定値との比較 ---")
+    # --- main が現在使っている遅延値（前回の校正結果）との比較 ---
+    current, updated_at = load_current_main_delays()
+    print(f"\n--- main の現行値（json/delay_config.json / 保存日時 {updated_at or '不明'}）との比較 ---")
     for cam in DELAYED_CAMS:
-        cur = CURRENT_MAIN_DELAYS.get(cam)
+        cur = current.get(cam)
         s = summary[cam]
         if cur is None:
             continue
@@ -304,8 +322,8 @@ def print_report(summary, speed):
     if speed is not None and speed in SPEED_MAP:
         delay = SPEED_MAP[speed]
         t_one_pulse = delay * 2
-        step_one_rotation = RATIO * (360 / 1.8) * MICRO_STATUS
-        sec = t_one_pulse * step_one_rotation * 2
+        step_one_rotation = RATIO * r_ctr.PULSE_PER_ROTATION
+        sec = t_one_pulse * step_one_rotation * 2   # 末尾の2はギア比
         formula_delay = sec * (60 / 360)
         print(f"\n--- 現行計算式との比較（speed={speed}）---")
         print(f"  計算式が出す遅延: {formula_delay:.3f} 秒（cam_under/cam_inside 共通）")

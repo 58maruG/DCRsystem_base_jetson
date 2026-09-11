@@ -5,7 +5,7 @@
 #
 #   方式（旧CLI版からの刷新）:
 #     - カメラ＋YOLO＋トラッカーを本番(main.py)と同条件で回す。
-#     - GUIに「健全果(運搬弁)」「被害果(除去弁)」の角度スライダーを置く。
+#     - GUIに「健全果(移送弁)」「被害果(除去弁)」の角度スライダーを置く。
 #     - 果実が確定（カメラ外へ通過）した瞬間を起点に、スライダーの角度から計算した
 #         待機時間 = sec * (角度 / 360)
 #       だけ待って、実際にリレー弁を開く。
@@ -18,7 +18,7 @@
 #
 #   注意:
 #     - キャリブ中は実際に弁を開く。周囲の安全を確認してから「開始」すること。
-#     - 健全果を流せば運搬弁、被害果を流せば除去弁が、それぞれの角度で発火する。
+#     - 健全果を流せば移送弁、被害果を流せば除去弁が、それぞれの角度で発火する。
 #     - Arduino が非常停止(ESTOP)を送ってきたら回転・発火を止める。
 # -------------------------------------------------
 import sys
@@ -156,9 +156,9 @@ class CalibrationWindow(QMainWindow):
         # 除去弁（被害果）スライダー
         self.remove_slider, self.remove_wait_lbl = self._make_angle_group(
             panel, "被害果 → 除去弁", init_remove)
-        # 運搬弁（健全果）スライダー
+        # 移送弁（健全果）スライダー
         self.transport_slider, self.transport_wait_lbl = self._make_angle_group(
-            panel, "健全果 → 運搬弁", init_transport)
+            panel, "健全果 → 移送弁", init_transport)
 
         # 開始/停止
         self.btn_start = QPushButton("開始")
@@ -285,7 +285,7 @@ class CalibrationWindow(QMainWindow):
         """確定＝本番の move 起点。ライブ角度の待機時間で対応する弁を発火する。"""
         label = result.label_name
         if label == "healthy":
-            channel, angle, name = r_ctr.RelayChannel.TRANSPORT, self._deg(self.transport_slider), "運搬弁"
+            channel, angle, name = r_ctr.RelayChannel.TRANSPORT, self._deg(self.transport_slider), "移送弁"
         else:
             channel, angle, name = r_ctr.RelayChannel.REMOVE, self._deg(self.remove_slider), "除去弁"
 
@@ -312,7 +312,7 @@ class CalibrationWindow(QMainWindow):
                     self.motor.rotate()
                 except Exception as e:
                     print(f"!! 回転開始でエラー: {e}")
-            self._status("計測中。果実を流してください（健全果=運搬弁 / 被害果=除去弁）。")
+            self._status("計測中。果実を流してください（健全果=移送弁 / 被害果=除去弁）。")
         else:
             self._stop_running()
 
@@ -361,7 +361,7 @@ class CalibrationWindow(QMainWindow):
             with open(r_ctr.RELAY_CAL_PATH, "w", encoding="utf-8") as f:
                 json.dump(out, f, ensure_ascii=False, indent=2)
             self._status(f"保存しました: 除去={out['remove']['angle']:.1f}° / "
-                         f"運搬={out['transport']['angle']:.1f}°  本番が次回起動時に適用します。")
+                         f"移送={out['transport']['angle']:.1f}°  本番が次回起動時に適用します。")
         except Exception as e:
             self._status(f"!! 保存に失敗: {e}")
 

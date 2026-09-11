@@ -17,9 +17,10 @@ from pathlib import Path
 _event_logger = logging.getLogger("event")
 _SEV_TO_LEVEL = {"INFO": logging.INFO, "WARN": logging.WARNING, "ERROR": logging.ERROR}
 
-# スキーマ版（旧 1.0.0 のファイルとは混在しても schema_version 列で判別できる）。
+# スキーマ版（旧版のファイルとは混在しても schema_version 列で判別できる）。
 #   全 CSV 行・events に自動付与する。
-SCHEMA_VERSION = "1.0.0"
+#   1.1.0: cycle に decision_reason / healthy_cams[n] を追加（仕分け判定の原因切り分け用）
+SCHEMA_VERSION = "1.1.0"
 
 CYCLE_COLUMNS = [
     "schema_version", "timestamp", "cycle_id",
@@ -44,6 +45,16 @@ CYCLE_COLUMNS = [
     "planned_eject_ts", "eject_delay[ms]",                  #リレーAPI呼び出し時刻・ソフト遅延
     "outcome_flag",                                         #リレー実行結果（排出後）
     "yolo_no_det_flag",                                     #HSV通過・YOLO無検出フラグ（1=HSV有でYOLO未検出 / 0=正常検出）
+    # --- 仕分け判定の原因切り分け（果実1個 = 1行で「なぜその弁になったか」が閉じるようにする）---
+    #   decision_reason:
+    #     damage              … 被害系クラスを検出したため除去（正常動作）
+    #     healthy_confirmed   … healthy を HEALTHY_CONFIRM_MIN_CAMS 台以上で検出 → 移送
+    #     healthy_unconfirmed … 被害は無いが healthy の確証が台数不足 → 安全側で除去
+    #     no_detection        … 帯内で捉えたがYOLO無検出 → 安全側で除去（yolo_no_det_flag=1）
+    #     unregistered_class  … CLASS_DISPLAY 未登録クラス → 安全側で除去
+    #   healthy_cams[n]: healthy を検出した「異なるカメラ台数」(0〜4)。
+    #     healthy_unconfirmed の行と併せて読むと、確証不足の程度（0台か1台か）が分かる。
+    "decision_reason", "healthy_cams[n]",
     # --- HW環境スナップショット（health 1Hz の最新キャッシュ値・per-cycle 相関用）---
     #   cycle と health は時間軸が違うため、同じ指標でも両軸に残す（ダウングレード判断）。
     "cpu_temp","cpu_util[%]",
@@ -263,6 +274,28 @@ class DCRLogger:
             pass  # コンソール出力の失敗を実処理に波及させない
 
     # ---------- internals: file I/O ----------
+    @staticmethod
+    def _resolve_csv_path(path: Path, columns) -> Path:
+        """追記して安全なCSVパスを返す。
+        存在しない → そのまま（新規作成）。存在して既存ヘッダが columns と一致 → そのまま（追記）。
+        一致しない（＝列構成を変えた） → path_v2.csv, path_v3.csv … と空いている番号へ逃がす。
+        ヘッダが読めない場合も安全側で別ファイルへ逃がす。"""
+        cols, base, n = list(columns), path, 1
+        while path.exists():
+            try:
+                with open(path, "r", newline="", encoding="utf-8") as fh:
+                    header = next((r for r in csv.reader(fh)
+                                   if r and not r[0].startswith("#")), None)
+            except Exception:
+                header = None
+            if header == cols:
+                return path
+            n += 1
+            if n > 99:      # 異常時に無限に増やさない
+                return path
+            path = base.with_name(f"{base.stem}_v{n}{base.suffix}")
+        return path
+
     def _csv_writer(self, kind, columns):
         d = self._date()
         if kind in self._writers and self._open_date.get(kind) == d:
@@ -271,7 +304,10 @@ class DCRLogger:
             self._files[kind].flush(); self._files[kind].close()
         kind_dir = Path(f"{self.base}_{kind}_5goki")
         kind_dir.mkdir(parents=True, exist_ok=True)
-        path = kind_dir / f"{kind}_{d}.csv"
+        # 列構成を変えた日に同日の既存ファイルへ追記すると、旧ヘッダの下に新しい列数の行が
+        # 並んで無言でズレる（DictWriter はヘッダを検証しない）。ヘッダを突き合わせ、
+        # 違えば連番付きの別ファイルへ逃がして既存データを守る。
+        path = self._resolve_csv_path(kind_dir / f"{kind}_{d}.csv", columns)
         new = not path.exists()
         fh = open(path, "a", newline="", encoding="utf-8")
         if not new:

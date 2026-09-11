@@ -777,8 +777,11 @@ class MainWindow(module_gui_JP.MainWindowUI):
             "cycle_dur[s]":        v("cycle_dur_s"),
         }
 
-    # --- HSV通過・YOLO無検出の cycle ログだけを残す（リレーは動かさない）---
-    def _log_no_detection_cycle(self, result_obj):
+    # --- HSV通過・YOLO無検出（無判定）の cycle ログを残す ---
+    #   リレーは呼び出し元が REMOVE で駆動済み。eject_flag は通常経路と同じ意味で書く
+    #   （1=除去）。yolo_no_det_flag=1 が立っている行だけを抜けば「無検出による除去」を
+    #   通常の被害検出による除去と分離して集計できる。
+    def _log_no_detection_cycle(self, result_obj, channel):
         _hw = self.tele.snapshot()
         self.dcr.cycle(
             cycle_id=result_obj.id,
@@ -786,13 +789,16 @@ class MainWindow(module_gui_JP.MainWindowUI):
             yolo_no_det_flag=1,
             **{"capture_latency[ms]": result_obj.capture_latency_ms if result_obj.capture_latency_ms is not None else "",
                "frame_dropped[n]":    result_obj.frame_dropped if result_obj.frame_dropped is not None else "",
-               "hsv_flag":            result_obj.hsv_pass if result_obj.hsv_pass is not None else ""},
+               "hsv_flag":            result_obj.hsv_pass if result_obj.hsv_pass is not None else "",
+               "eject_flag":          1 if channel == r_ctr.RelayChannel.REMOVE else 0,
+               "healthy_cams[n]":     result_obj.healthy_cams if result_obj.healthy_cams is not None else ""},
+            decision_reason=result_obj.decision_reason or "",
             **self._cost_columns(result_obj),
             **_hw,
         )
 
-    # --- リレー先を判定する（健全果のみ運搬、それ以外は除去）---
-    #   健全/障害の判定は result_obj.is_damaged（module_yolo._resolve_quality が確定）で行う。
+    # --- リレー先を判定する（健全果のみ移送、それ以外は除去）---
+    #   健全/被害の判定は result_obj.is_damaged（module_yolo._resolve_quality が確定）で行う。
     #   label_name の "healthy" 一致では判定しないこと（複数カメラでの健全確証が無い場合、
     #   label_name="healthy" でも is_damaged=True になりうるため）。
     #   表示名は module_gui_JP.CLASS_DISPLAY に一元化している。
@@ -805,6 +811,8 @@ class MainWindow(module_gui_JP.MainWindowUI):
             #   不良として除去し、英語ラベルのまま表示・警告ログを残す。
             log.warning("未登録クラス '%s' を検出。不良として除去します。CLASS_DISPLAYへの登録を推奨。",
                         disease_name)
+            # cycle ログでこの経路を分離できるよう、_resolve_quality が付けた理由を上書きする
+            result_obj.decision_reason = "unregistered_class"
             return r_ctr.RelayChannel.REMOVE, disease_name
 
         # is_damaged が未確定(None)の場合も安全側でREMOVE扱いにする（通常は到達しない）。
@@ -812,7 +820,7 @@ class MainWindow(module_gui_JP.MainWindowUI):
         return channel, info["jp"]
 
     # --- cycle ログ1行目（確定直後に書けるデータ）を記録する ---
-    #   eject_decision: 除去(REMOVE)=1 / 健全運搬(TRANSPORT)=0
+    #   eject_decision: 除去(REMOVE)=1 / 健全移送(TRANSPORT)=0
     #   capture_latency_ms / frame_dropped / preproc_ms / postproc_ms は
     #   _attach_cycle_stats が result_obj に付与した集計値
     def _log_cycle_row(self, result_obj, obj_id, channel):
@@ -829,7 +837,9 @@ class MainWindow(module_gui_JP.MainWindowUI):
                "preproc[ms]":         result_obj.preproc_ms if result_obj.preproc_ms is not None else "",
                "postproc[ms]":        result_obj.postproc_ms if result_obj.postproc_ms is not None else "",
                "eject_flag":          1 if channel == r_ctr.RelayChannel.REMOVE else 0,
-               "yolo_no_det_flag":    0},
+               "yolo_no_det_flag":    0,
+               "healthy_cams[n]":     result_obj.healthy_cams if result_obj.healthy_cams is not None else ""},
+            decision_reason=result_obj.decision_reason or "",
             **self._cost_columns(result_obj),
             **_hw,
         )
@@ -865,9 +875,19 @@ class MainWindow(module_gui_JP.MainWindowUI):
         if not self.toggle_switch.isChecked():
             return
 
-        # HSV通過・YOLO無検出: リレーは動かさず cycle ログだけ残して終了
+        # HSV通過・YOLO無検出（無判定）: 健全の確証が1台も取れていないので安全側で除去する。
+        #   通常経路と違い label_name="None" で CLASS_DISPLAY に無いため、_resolve_channel は
+        #   通さず（未登録クラス警告が毎回出るのを避ける）ここで REMOVE を直接指定する。
+        #   履歴テーブルは per_cam が空なので全カメラ列が "-" で描画され、
+        #   「全カメラ未検出のまま除去された」ことが画面上でも追える。
         if getattr(result_obj, 'yolo_no_det_flag', 0) == 1:
-            self._log_no_detection_cycle(result_obj)
+            obj_id  = result_obj.id
+            channel = r_ctr.RelayChannel.REMOVE
+            self.run_in_background(self._relay_and_log, channel, self.saved_speed, obj_id)
+            self._log_no_detection_cycle(result_obj, channel)
+            self._append_history_record(result_obj, obj_id, result_obj.label_name)
+            log.info("判定確定 | ID:%03d | 結果:未検出（安全側で除去）", obj_id)
+            self.update_history_display()
             return
 
         disease_name = result_obj.label_name

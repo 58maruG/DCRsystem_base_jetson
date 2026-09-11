@@ -99,22 +99,34 @@ YOLO_IMG_SIZE = 640
 CONF_THRESHOLD = 0.5
 
 # ================================================
-# 健全/障害 二値判定設定
+# 健全/被害 二値判定設定
 # ================================================
-# 健全と判定するために必要な、異なるカメラでの healthy 検出台数（同一カメラの複数フレームは1カウント）。
-#   障害系クラス（unripeを含む）は1カメラ・1検出でも即座に障害と判定する（低いハードル）。
-#   健全と判定するには複数カメラでの一致を要求し、見落とし（偽健全）を防ぐ（高いハードル）。
+# 判定は2段構え。まずカメラごとに1票へ畳み（_aggregate_per_cam）、その票を統合する（_resolve_quality）。
+#   カメラ内の票: healthy 以外を1件でも検出していれば「被害票」、していなければ「健全票」。
+#     → そのカメラの最高信頼度クラスが healthy でも、低信頼度の被害検出があれば被害票になる
+#       （例: healthy 0.90 / healthy 0.85 / stemcrack 0.60 の3フレーム → stemcrack 0.60 の被害票）。
+#   票の統合: 被害票が1台でもあれば即座に被害（低いハードル）。健全と判定するには
+#     HEALTHY_CONFIRM_MIN_CAMS 台以上での一致を要求し、見落とし（偽健全）を防ぐ（高いハードル）。
+# この定数は後者のしきい値。異なるカメラでの healthy 検出台数（同一カメラの複数フレームは1カウント）。
 HEALTHY_CONFIRM_MIN_CAMS = 2
 
 # ================================================
 # セグメンテーション（個体区切り）設定
 # ================================================
-# 不在タイムアウト（秒）: いずれのカメラもこの時間サクランボを検出しなければ
+# 個体のライフサイクル（開始・継続・終了）は「HSVが帯内＝推論ゲートの中心窓で果実を捉えたか」で
+#   駆動する。YOLOの検出有無では駆動しない。YOLOが1度も検出できなかった個体も個体として成立させ、
+#   安全側（除去）へ倒したうえで yolo_no_det_flag=1 として cycle ログに残すため
+#   （HSV通過・YOLO無検出は escape の主要経路であり、ログに出ないと Layer2 の評価ができない）。
+#   ※「HSV可視」ではなく「帯内可視」を使うこと。HSV可視はROI全幅に及ぶため、4カメラの可視期間が
+#     連鎖して近接2個が1個に統合されうる。帯内可視なら窓の通過中（数フレーム）に限られ、
+#     4カメラでほぼ同時に立つため、従来のYOLO検出ベースと同じ時間クラスタになる。
+#
+# 不在タイムアウト（秒）: いずれのカメラもこの時間サクランボを帯内で捉えなければ
 #   「1個分が通過し終わった」とみなして確定する（出口ヒステリシス）。
 #   大きすぎる → 近接した2個が1個に統合される / 小さすぎる → 1個が複数IDに分割される
 EMPTY_TIMEOUT_SEC = 0.5
-# 最小可視時間（秒）: 個体が確定対象として「本物」と認められるための最小の可視継続。
-#   これ未満しか見えず、かつYOLO検出も無かった瞬間的なノイズ blip は破棄し、
+# 最小可視時間（秒）: 個体が確定対象として「本物」と認められるための最小の帯内可視継続。
+#   これ未満しか帯内に居らず、かつYOLO検出も無かった瞬間的なノイズ blip は破棄し、
 #   幽霊ID・黒タイルの量産を防ぐ（入口ヒステリシス）。
 #   ※ YOLO検出が1度でもあれば、可視時間に依らず本物として確定する。
 MIN_VISIBLE_SEC = 0.12
@@ -147,6 +159,7 @@ COLORS = {
     "suturecrack": (170, 178,  32),
     "brownrot":    ( 45,  82, 160),
     "blacktwin":   ( 79,  79,  47),
+    "insect":      ( 77, 212, 181),
     "kasure":      (131, 180, 212),
 }
 
@@ -162,11 +175,18 @@ class YoloResult:
         self.confidence   = confidence
         self.cam_name     = cam_name
 
-        # 健全/障害の二値判定結果（_resolve_quality が確定時に設定）。
-        #   True=障害（除去） / False=健全（運搬） / None=未確定。
+        # 健全/被害の二値判定結果（_resolve_quality が確定時に設定）。
+        #   True=被害（除去） / False=健全（移送） / None=未確定。
         #   仕分け判定は必ずこちらを見る。label_name の "healthy" 一致では判定しないこと
         #   （複数カメラでの健全確証が無い場合、label_name="healthy" でも is_damaged=True になりうる）。
         self.is_damaged: bool | None = None
+
+        # 仕分け判定の原因（cycle ログの decision_reason 列）。値の意味は dcr_logger.CYCLE_COLUMNS を参照。
+        #   damage / healthy_confirmed / healthy_unconfirmed / no_detection / unregistered_class
+        #   （unregistered_class のみ module_main_window_JP._resolve_channel が後から上書きする）
+        self.decision_reason: str | None = None
+        # healthy を検出した「異なるカメラ台数」(0〜4)。healthy_unconfirmed の原因切り分け用。
+        self.healthy_cams: int | None = None
 
         # 個体確定時に _finalize_object が付与するサイクル集計（cycle ログ用）。
         # 既定値を持たせ、未確定の中間結果でも属性参照で落ちないようにする。
@@ -179,7 +199,7 @@ class YoloResult:
         self.postproc_ms        = None   # 後処理（アノテーション・parse）時間平均(ms)
         self.capture_latency_ms = None   # カメラフレーム取得時間の平均(ms)
         self.frame_dropped      = None   # この個体の通過中にドロップしたフレーム数（全カメラ合計）
-        self.hsv_pass           = None   # YOLO検出が1度でもあったか（1=あり/0=なし）
+        self.hsv_pass           = None   # HSVが果実を1度でも捉えたか（1=あり/0=なし）。cycleの hsv_flag 列
         self.hsv_mask_ratio     = None   # HSVマスク面積比の平均（0〜1）
         self.yolo_no_det_flag   = None   # HSV通過・YOLO無検出フラグ（1=HSV有でYOLO未検出 / 0=正常検出）
         # --- 1個体あたりの処理コスト内訳（4カメラ・全フレームの「合計」）---
@@ -499,7 +519,14 @@ class YoloDetector:
 
     def _finalize_object(self) -> YoloResult | None:
         """現個体を確定（または破棄）する。確定したら YoloResult を返す。
-        入口ヒステリシス: 可視時間が MIN_VISIBLE_SEC 未満かつYOLO検出も無い blip は破棄しIDを進めない。"""
+        入口ヒステリシス: 帯内可視時間が MIN_VISIBLE_SEC 未満かつYOLO検出も無い blip は破棄しIDを進めない。
+
+        確定した個体は次の2通りに分かれる。
+          obj_detections あり … 通常経路。_resolve_quality で健全/被害を判定しリレーを駆動する。
+          obj_detections なし … HSVは帯内で捉えたがYOLOが一度も CONF_THRESHOLD に届かなかった個体。
+                                 yolo_no_det_flag=1・is_damaged=True の YoloResult を返す
+                                 （健全の確証が1台も無いため安全側で除去へ倒す）。
+                                 escape の主要経路なので、必ず cycle ログに1行残すこと。"""
         result = None
         if self.obj_first_seen is not None:
             visible_dur = self.obj_last_seen - self.obj_first_seen
@@ -518,10 +545,15 @@ class YoloDetector:
                             self.logger.write_training_image(cam, d['frame'], d['label'])
                     self.current_cherry_id += 1
                 else:
-                    # 本物だがYOLO未検出 → 学習用保存 + cycle ログに yolo_no_det_flag=1 で記録
+                    # 帯内で捉えたがYOLO未検出（無判定）
+                    #   → 学習用保存 + cycle ログに yolo_no_det_flag=1 で記録。
+                    #   健全である確証が1台も取れていないので、安全側（除去）へ倒す。
                     for cam, d in self.obj_cam_train.items():
                         self.logger.write_training_image(cam, d['frame'], d['label'])
                     no_det = YoloResult(self.current_cherry_id, "None", 0.0, "")
+                    no_det.is_damaged      = True
+                    no_det.decision_reason = "no_detection"
+                    no_det.healthy_cams    = 0
                     self._attach_cycle_stats(no_det, yolo_no_det=1, visible_dur=visible_dur)
                     result = no_det
                     self.current_cherry_id += 1
@@ -543,39 +575,10 @@ class YoloDetector:
             best.conf_min = round(min(confs), 3)
             best.conf_avg = round(sum(confs) / len(confs), 3)
 
-        # クラス別の最大信頼度を集計し、信頼度降順で best に添える（GUIの複数クラス表示用）。
-        #   "None"（未検出）は除外。write_csv の by_class と同じ集計方針。
-        by_class: dict[str, float] = {}
-        for d in self.obj_detections:
-            if d.label_name == "None":
-                continue
-            if d.label_name not in by_class or d.confidence > by_class[d.label_name]:
-                by_class[d.label_name] = d.confidence
-        breakdown = sorted(by_class.items(), key=lambda kv: kv[1], reverse=True)
-        best.class_breakdown = breakdown
-
-        # カメラ別の検出内訳を集計する（GUIのカメラ別列用）。
-        #   各カメラについて {クラス: そのカメラでの最大信頼度} を作り、そこから
-        #     top        … そのカメラの最高信頼度クラス (label, conf)
-        #     final_conf … 確定クラス(best.label_name)をそのカメラが検出していれば信頼度、無ければ None
-        #   を取り出す。GUIは final_conf があれば「◎確定クラス」を優先表示し（そのカメラの
-        #   最高信頼度クラスでなくても）、無ければ top を、検出ゼロなら "-" を出す。
-        final_label = best.label_name
-        cam_class_max: dict[str, dict[str, float]] = {}
-        for d in self.obj_detections:
-            if d.label_name == "None":
-                continue
-            m = cam_class_max.setdefault(d.cam_name, {})
-            if d.label_name not in m or d.confidence > m[d.label_name]:
-                m[d.label_name] = d.confidence
-        per_cam: dict[str, dict] = {}
-        for cam, cmax in cam_class_max.items():
-            top_label = max(cmax, key=cmax.get)
-            per_cam[cam] = {
-                "top":        (top_label, cmax[top_label]),
-                "final_conf": cmax.get(final_label),
-            }
-        best.per_cam_breakdown = per_cam
+        # クラス別・カメラ別の内訳を best に添える（GUIの複数クラス表示・カメラ別列用）。
+        #   _resolve_quality と同じ _aggregate_per_cam の集計から作るため、画面に出ている
+        #   カメラ別の内訳と、仕分け判定の根拠が構造的に一致する。
+        self._build_breakdowns(best, self._aggregate_per_cam(self.obj_detections))
         if self.obj_infer_count > 0:
             best.infer_avg_ms = round(self.obj_infer_ms_sum / self.obj_infer_count, 2)
         if self.obj_preproc_count > 0:
@@ -584,7 +587,9 @@ class YoloDetector:
             best.postproc_ms = round(self.obj_postproc_ms_sum / self.obj_postproc_count, 2)
         if self.obj_hsv_area_count > 0:
             best.hsv_mask_ratio = round(self.obj_hsv_area_sum / self.obj_hsv_area_count, 4)
-        best.hsv_pass = 1 if self.obj_has_detection else 0
+        # cycle の hsv_flag 列。HSVが果実を捉えたか（YOLO検出の有無ではない）。
+        #   個体は帯内可視で成立するため通常は1。0 は close() 等の例外経路のみ。
+        best.hsv_pass = 1 if self.obj_visible_frames > 0 else 0
         # カメラのサイクル統計を集約（cameras が渡されている場合のみ）
         if self.cameras:
             total_dropped = 0
@@ -625,34 +630,106 @@ class YoloDetector:
             best.visible_dur_s = round(visible_dur, 3)
         best.cycle_dur_s = round(time.monotonic() - self._cycle_started_at, 3)
 
+    @staticmethod
+    def _aggregate_per_cam(detections: list) -> dict:
+        """検出履歴（フレーム単位）を「カメラ別 × クラス別の最高信頼度検出」へ畳む。
+
+        二値判定（_resolve_quality）とGUI/ログの内訳（_build_breakdowns）が、この1つの
+        集計を共有する。表示に出ているカメラ別の内訳と判定の根拠が同じデータから出るため、
+        「GUIでは cam_top が healthy に見えるのに被害判定された」という食い違いが起きない。
+
+        戻り値: {cam_name: {label_name: そのカメラ・そのクラスで最高信頼度の YoloResult}}
+          "None"（未検出）は除外する。有効検出が1件も無いカメラはキー自体を作らない。
+        """
+        per_cam: dict[str, dict[str, YoloResult]] = {}
+        for d in detections:
+            if d.label_name == "None":
+                continue
+            by_label = per_cam.setdefault(d.cam_name, {})
+            cur = by_label.get(d.label_name)
+            if cur is None or d.confidence > cur.confidence:
+                by_label[d.label_name] = d
+        return per_cam
+
+    @staticmethod
+    def _build_breakdowns(best: YoloResult, per_cam_agg: dict) -> None:
+        """_aggregate_per_cam の集計から、GUI表示用の内訳を best に付与する。
+
+        class_breakdown   … [(クラス名, 全カメラを通じた最大信頼度)] を信頼度降順で。
+        per_cam_breakdown … {cam: {"top": (label, conf), "final_conf": conf|None}}
+          top        … そのカメラの最高信頼度クラス
+          final_conf … 確定クラス(best.label_name)をそのカメラが検出していれば信頼度、無ければ None
+          GUIは final_conf があれば「◎確定クラス」を優先表示し（そのカメラの最高信頼度
+          クラスでなくても）、無ければ top を、検出ゼロなら "-" を出す。
+        """
+        by_class: dict[str, float] = {}
+        for by_label in per_cam_agg.values():
+            for label, r in by_label.items():
+                if label not in by_class or r.confidence > by_class[label]:
+                    by_class[label] = r.confidence
+        best.class_breakdown = sorted(by_class.items(), key=lambda kv: kv[1], reverse=True)
+
+        final_label = best.label_name
+        per_cam: dict[str, dict] = {}
+        for cam, by_label in per_cam_agg.items():
+            top_label = max(by_label, key=lambda l: by_label[l].confidence)
+            final_det = by_label.get(final_label)
+            per_cam[cam] = {
+                "top":        (top_label, by_label[top_label].confidence),
+                "final_conf": final_det.confidence if final_det is not None else None,
+            }
+        best.per_cam_breakdown = per_cam
+
     def _resolve_quality(self, detections: list) -> YoloResult | None:
         """
-        全カメラの履歴から健全/障害の二値判定（is_damaged）を行い、判定の根拠となった
-        検出（最も信頼度が高いもの）を返す。label_name には引き続き具体的なクラス名が入るが、
-        仕分け（リレー制御・GUI集計）に使うのは is_damaged の方であり、label_name 単体
+        カメラごとに1票へ畳んでから票を統合し、健全/被害の二値判定（is_damaged）を行う。
+        判定の根拠となった検出（YoloResult）を返す。label_name には引き続き具体的なクラス名が
+        入るが、仕分け（リレー制御・GUI集計）に使うのは is_damaged の方であり、label_name 単体
         （"healthy" かどうか）では判定しない。
 
-        障害判定（低いハードル）: healthy 以外のクラス（unripe を含む）が1件でも
-          検出されていれば、カメラ台数によらず即座に障害と判定する。表示・ログ用の
-          ラベルは、障害系検出のうち最も信頼度が高いものを採用する。
-        健全判定（高いハードル）: 障害系検出が皆無で、かつ HEALTHY_CONFIRM_MIN_CAMS 台以上の
-          異なるカメラで healthy が検出された場合のみ健全と判定する。条件を満たさない
-          場合は見落とし（偽健全）を避けるため、安全側で障害として扱う。
+        1) カメラ内の票（_aggregate_per_cam の結果 1カメラ分）
+             healthy 以外のクラス（unripe を含む）を1件でも検出していれば「被害票」、
+             していなければ「健全票」。カメラ内は被害優先のORで、フレーム数やそのカメラの
+             最高信頼度クラスは問わない。
+             例) cam_top: healthy 0.90 / healthy 0.85 / stemcrack 0.60 → stemcrack 0.60 の被害票。
+        2) 票の統合
+             被害判定（低いハードル）: 被害票が1台でもあれば、台数によらず即座に被害と判定する。
+               表示・ログ用のラベルは、被害票のうち最も信頼度が高いものを採用する。
+             健全判定（高いハードル）: 被害票が皆無で、かつ HEALTHY_CONFIRM_MIN_CAMS 台以上の
+               異なるカメラで healthy が検出された場合のみ健全と判定する。条件を満たさない
+               場合は見落とし（偽健全）を避けるため、安全側で被害として扱う。
+
+        ※ self を参照しない純粋なロジック（standalone/classification_gui_demo.py が
+           self=None で直接呼ぶため、ヘルパーはクラス名で修飾して呼ぶこと）。
         """
-        if not detections:
+        per_cam_agg = YoloDetector._aggregate_per_cam(detections)
+        if not per_cam_agg:
             return None
 
-        damage_list = [d for d in detections if d.label_name != "healthy"]
-        if damage_list:
-            best = max(damage_list, key=lambda x: x.confidence)
-            best.is_damaged = True
+        # healthy を捉えたカメラ台数。被害判定の行でも原因分析に使うので常に数えておく
+        #   （被害票になったカメラが healthy も出していた場合、そのカメラもここには含める）。
+        healthy_cams = sum(1 for by_label in per_cam_agg.values() if "healthy" in by_label)
+
+        # カメラごとの被害票。被害を含むカメラは、そのカメラ内で最高信頼度の被害検出を代表とする。
+        damage_votes = []
+        for by_label in per_cam_agg.values():
+            dmg = [r for label, r in by_label.items() if label != "healthy"]
+            if dmg:
+                damage_votes.append(max(dmg, key=lambda r: r.confidence))
+
+        if damage_votes:
+            best = max(damage_votes, key=lambda r: r.confidence)
+            best.is_damaged      = True
+            best.decision_reason = "damage"
+            best.healthy_cams    = healthy_cams
             return best
 
-        # ここに到達するのは healthy のみが検出されているケース。
-        healthy_list = detections
-        best = max(healthy_list, key=lambda x: x.confidence)
-        healthy_cams = len({d.cam_name for d in healthy_list})
-        best.is_damaged = healthy_cams < HEALTHY_CONFIRM_MIN_CAMS
+        # ここに到達するのは全カメラが健全票（＝ healthy のみ検出）のケース。
+        best = max((by_label["healthy"] for by_label in per_cam_agg.values()),
+                   key=lambda r: r.confidence)
+        best.is_damaged      = healthy_cams < HEALTHY_CONFIRM_MIN_CAMS
+        best.decision_reason = "healthy_unconfirmed" if best.is_damaged else "healthy_confirmed"
+        best.healthy_cams    = healthy_cams
         return best
 
     # ------------------------------------------------------
@@ -741,24 +818,42 @@ class YoloDetector:
         do_infer = False
         gen = obj_id = center_dist = 0
 
-        # ── 共有状態: HSVコスト集計・出口ヒステリシス・帯判定・枠予約 ──
+        # ── 共有状態: HSVコスト集計・帯判定・出口/入口ヒステリシス・枠予約 ──
         with self._state_lock:
             self.obj_hsv_ms_sum += hsv_ms
             self.obj_hsv_frames += 1
             if found:
                 self.obj_visible_frames += 1
 
-            # 出口ヒステリシス（いずれのカメラも一定時間検出なし → 確定）
-            if self.obj_active and (now - self.last_seen_time) >= self.EMPTY_TIMEOUT_SEC:
-                finalized_result = self._finalize_object()
-
-            # 帯判定（重心が中心窓内 かつ このカメラの推論枚数が上限未満）
+            # 帯判定（重心が中心窓内か）。推論枠の残りとは切り離して評価する。
+            #   個体のライフサイクルはこの in_win で駆動するため、枠を使い切った後の
+            #   フレームでも「まだ帯内に居る」ことを検出し続けなければならない。
+            in_win = False
             if found:
                 half   = infer_window_px(cam_name)
                 cx     = frame.shape[1] / 2.0
                 in_win = abs(target['mx'] - cx) <= half
-                if in_win and self.obj_infer_frames_cam.get(cam_name, 0) < INFER_FRAMES_PER_CAM:
-                    # HSVマスク面積比の積算（帯内のみ）
+
+            # 出口ヒステリシス（いずれのカメラも一定時間 帯内で捉えず → 確定）
+            if self.obj_active and (now - self.last_seen_time) >= self.EMPTY_TIMEOUT_SEC:
+                finalized_result = self._finalize_object()
+
+            if in_win:
+                # 入口ヒステリシス／個体の継続: YOLO検出の有無に依らず帯内可視で個体を成立させる。
+                #   これにより「HSVは捉えたがYOLOが一度も検出しなかった」個体も確定処理へ入り、
+                #   _finalize_object の yolo_no_det 経路（cycle ログ）に到達する。
+                self.last_seen_time = now
+                self.obj_last_seen  = now
+                if not self.obj_active:
+                    self.obj_active     = True
+                    self.obj_first_seen = now
+                    if self.cameras:
+                        for cam in self.cameras:
+                            cam.reset_cycle_stats()
+
+                # このカメラの推論枚数が上限未満なら推論枠を予約する
+                if self.obj_infer_frames_cam.get(cam_name, 0) < INFER_FRAMES_PER_CAM:
+                    # HSVマスク面積比の積算（実際に推論するフレームのみ）
                     fp = frame.shape[0] * frame.shape[1]
                     if fp > 0:
                         self.obj_hsv_area_sum   += target['area'] / fp
@@ -826,7 +921,6 @@ class YoloDetector:
 
         annotated_frame = img.copy()
         best_result     = YoloResult(obj_id, "None", 0.0, cam_name)
-        has_valid_track = False
 
         for row in tracks:
             x1, y1, x2, y2 = map(int, row[:4])
@@ -835,7 +929,6 @@ class YoloDetector:
             label = self.model.names[cls].lower()
             if conf < CONF_THRESHOLD:
                 continue
-            has_valid_track = True
             color      = COLORS.get(label, (0, 255, 0))
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 3)
             label_text = f"{label} {conf:.2f}"
@@ -847,15 +940,9 @@ class YoloDetector:
             if conf > best_result.confidence:
                 best_result = YoloResult(obj_id, label, conf, cam_name)
 
-        if has_valid_track:
-            self.last_seen_time = now_ctx
-            self.obj_last_seen  = now_ctx
-            if not self.obj_active:
-                self.obj_active     = True
-                self.obj_first_seen = now_ctx
-                if self.cameras:
-                    for cam in self.cameras:
-                        cam.reset_cycle_stats()
+        # 個体のライフサイクル（obj_active / obj_first_seen / last_seen_time）は
+        #   _process_frame の帯内可視判定が唯一の更新元。ここでは触らない
+        #   （YOLO検出を起点にすると、検出できなかった個体が成立せずログにも残らない）。
 
         self.obj_postproc_ms_sum += (time.perf_counter() - t_post) * 1000.0
         self.obj_postproc_count  += 1
